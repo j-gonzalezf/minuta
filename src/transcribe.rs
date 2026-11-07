@@ -136,7 +136,7 @@ const SAMPLE_RATE: u32 = 16_000;
 ///
 /// Detector sencillo por energía: la pista se mira en ventanas de 20 ms; una
 /// ventana "suena" si su nivel supera un umbral relativo al ruido de fondo. Las
-/// ventanas que suenan se agrupan en trozos; un silencio de más de 0,8 s cierra el
+/// ventanas que suenan se agrupan en trozos; un silencio de más de 1,2 s cierra el
 /// trozo, y cada trozo se amplía 0,25 s por cada lado para no cortar sílabas.
 /// Los trozos muy largos se parten en un silencio interior para no superar los
 /// 30 s que Whisper procesa de una vez.
@@ -156,7 +156,9 @@ pub fn speech_chunks(audio: &[f32], rate: u32) -> Vec<(usize, usize)> {
     let floor = sorted[sorted.len() / 5];
     let threshold = (floor * 4.0).max(0.004);
 
-    let max_silence = (0.8 * 50.0) as usize; // ventanas de 20 ms
+    // Una pausa de más de 1,2 s cierra el trozo: las pausas para pensar dentro de
+    // una frase suelen ser más cortas; las de escuchar al otro, más largas.
+    let max_silence = (1.2 * 50.0) as usize; // ventanas de 20 ms
     let padding = (0.25 * 50.0) as usize;
     let max_len = 28 * 50;
 
