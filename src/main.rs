@@ -7,7 +7,11 @@
 
 mod app;
 mod audio;
+mod merge;
+mod model;
+mod pipeline;
 mod settings;
+mod transcribe;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

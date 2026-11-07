@@ -22,6 +22,8 @@ pub struct Settings {
     pub language: String,
     /// Modelo de Whisper (nombre del archivo ggml sin extensión).
     pub model: String,
+    /// Palabras que salen a menudo y Whisper tiende a escribir mal (nombres, marcas, términos).
+    pub vocabulary: Vec<String>,
 }
 
 impl Default for Settings {
@@ -36,6 +38,9 @@ impl Default for Settings {
             transcript_file: "transcripcion.md".to_string(),
             language: "es".to_string(),
             model: "ggml-large-v3-turbo".to_string(),
+            vocabulary: ["brìos", "Martín", "newsletter", "Resend", "Search Console", "Vercel", "GitHub", "Discord"]
+                .map(String::from)
+                .to_vec(),
         }
     }
 }

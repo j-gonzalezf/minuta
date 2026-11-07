@@ -51,6 +51,13 @@ En construcción. Nada usable todavía.
 - **La frase es la unidad.** Whisper devuelve frases con su segundo de inicio;
   se intercalan las dos pistas por ese tiempo. No se redacta ni se resume: eso
   se hace después, leyendo la transcripción.
+- **Cada pista se trocea por silencios antes de transcribir.** Whisper sitúa mal
+  las frases cuando hay silencios largos, y en una pista donde solo habla una
+  persona los hay constantemente. Un detector de energía separa los trozos con
+  voz; cada trozo se transcribe aparte y sus frases llevan el tiempo real.
+- **Contexto entre trozos.** A cada trozo se le pasa la última frase transcrita y
+  una lista de palabras habituales (nombres, marcas; en ajustes), para que no
+  empiece de cero y escriba bien "brìos" o "newsletter".
 - **Las grabaciones se guardan siempre.** Si una transcripción sale mal o
   aparece un modelo mejor, se repite sin repetir la reunión.
 - **Dos pistas, dos personas.** El programa no separa voces dentro de una
@@ -69,7 +76,26 @@ cargo run            # compila y abre la ventana
 cargo build --release
 ```
 
-La primera compilación tarda varios minutos: construye whisper.cpp.
+La primera compilación tarda unos diez minutos: construye whisper.cpp con
+CUDA. Necesita en el entorno `CUDA_PATH` (lo pone el instalador de CUDA) y
+`LIBCLANG_PATH=C:\Program Files\LLVM\bin` (para generar los enlaces a
+whisper.cpp). Abre una terminal nueva después de instalar las herramientas.
+
+El ejecutable carga en el arranque tres DLL de CUDA (`cudart64_13.dll`,
+`cublas64_13.dll` y `cublasLt64_13.dll`, en `CUDA\v13.5\bin\x64`). En este PC
+están en el PATH; para llevar el `.exe` a otro, copiarlas a su lado.
+
+El modelo (`ggml-large-v3-turbo`, 1,6 GB) se descarga la primera vez a
+`%LOCALAPPDATA%\minuta\models`. Los ajustes viven en
+`%APPDATA%\minuta\config.toml`.
+
+Pruebas sin ventana:
+
+```bash
+cargo run --example prueba_grabacion                      # graba 5 s las dos pistas
+cargo run --example prueba_transcripcion -- a.wav b.wav   # transcribe dos WAV y muestra el Markdown
+cargo test                                                # el intercalado de pistas
+```
 
 ## Ramas
 

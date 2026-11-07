@@ -211,7 +211,13 @@ fn capture_loop(
 
     let mut queue: VecDeque<u8> = VecDeque::with_capacity(SAMPLE_RATE as usize * blockalign);
     barrier.wait();
+    let started = std::time::Instant::now();
     client.start_stream().context("arrancar la captura")?;
+
+    // Cada dispositivo tarda un tiempo distinto en entregar su primer paquete (el
+    // altavoz, más de un segundo). Para que las dos pistas midan lo mismo desde el
+    // instante común de arranque, el hueco inicial se rellena con silencio.
+    let mut first_data = true;
 
     while !stop.load(Ordering::SeqCst) {
         // Con 3 s sin datos no es un error: el altavoz en silencio no entrega paquetes
@@ -224,8 +230,20 @@ fn capture_loop(
             continue;
         }
         let usable = queue.len() - queue.len() % blockalign;
+        if usable == 0 {
+            continue;
+        }
         let bytes: Vec<u8> = queue.drain(..usable).collect();
         let mut count = 0u64;
+        if first_data {
+            first_data = false;
+            let chunk_frames = (usable / blockalign) as f64;
+            let gap_frames = started.elapsed().as_secs_f64() * SAMPLE_RATE as f64 - chunk_frames;
+            for _ in 0..gap_frames.max(0.0) as u64 {
+                writer.write_sample(0i16).context("escribir en el WAV")?;
+                count += 1;
+            }
+        }
         for chunk in bytes.chunks_exact(4) {
             let sample = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             let value = (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;

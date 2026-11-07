@@ -1,18 +1,23 @@
 //! La ventana: ficha de la reunión, grabar / pausar / detener y el resultado.
 
 use crate::audio::Recorder;
+use crate::pipeline::{self, Event, Job};
 use crate::settings::Settings;
-use chrono::Local;
+use crate::transcribe::Progress;
+use chrono::{DateTime, Local};
 use eframe::egui;
 use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
 
 enum State {
     /// Ficha de la reunión, antes de grabar.
     Setup,
     /// Grabando (o en pausa).
-    Recording { recorder: Recorder, dir: PathBuf },
+    Recording { recorder: Recorder, dir: PathBuf, started_at: DateTime<Local> },
+    /// Transcribiendo en segundo plano.
+    Transcribing { dir: PathBuf, rx: Receiver<Event>, status: String, percent: Option<u32>, seconds: f64 },
     /// Terminado: muestra dónde ha quedado todo.
-    Done { dir: PathBuf, message: String },
+    Done { dir: PathBuf, message: String, transcript: Option<PathBuf> },
 }
 
 pub struct MinutaApp {
@@ -54,7 +59,7 @@ impl MinutaApp {
         match Recorder::start(&mic, &speaker) {
             Ok(recorder) => {
                 self.error = None;
-                self.state = State::Recording { recorder, dir };
+                self.state = State::Recording { recorder, dir, started_at: Local::now() };
             }
             Err(err) => self.error = Some(format!("No se pudo empezar a grabar: {err:#}")),
         }
@@ -62,13 +67,63 @@ impl MinutaApp {
 
     fn stop_recording(&mut self) {
         let state = std::mem::replace(&mut self.state, State::Setup);
-        if let State::Recording { recorder, dir } = state {
+        if let State::Recording { recorder, dir, started_at } = state {
             let seconds = recorder.recorded_seconds();
-            let message = match recorder.stop() {
-                Ok(()) => format!("Grabados {} de audio en dos pistas.", format_duration(seconds)),
-                Err(err) => format!("La grabación terminó con un error: {err:#}"),
+            if let Err(err) = recorder.stop() {
+                self.state = State::Done {
+                    dir,
+                    message: format!("La grabación terminó con un error: {err:#}"),
+                    transcript: None,
+                };
+                return;
+            }
+            let job = Job {
+                dir: dir.clone(),
+                title: self.meeting_name.trim().to_string(),
+                started_at,
+                my_name: self.settings.my_name.clone(),
+                other_name: if self.other_name.trim().is_empty() { self.settings.other_name.clone() } else { self.other_name.trim().to_string() },
+                settings: self.settings.clone(),
             };
-            self.state = State::Done { dir, message };
+            let rx = pipeline::run(job);
+            self.state = State::Transcribing { dir, rx, status: "Preparando…".into(), percent: None, seconds };
+        }
+    }
+
+    /// Recoge los avisos del hilo de transcripción.
+    fn poll_transcription(&mut self) {
+        let finished = if let State::Transcribing { rx, status, percent, .. } = &mut self.state {
+            let mut finished = None;
+            while let Ok(event) = rx.try_recv() {
+                match event {
+                    Event::Progress(Progress::Status(text)) => {
+                        *status = text;
+                        *percent = None;
+                    }
+                    Event::Progress(Progress::Percent(p)) => *percent = Some(p),
+                    Event::Finished(result) => finished = Some(result),
+                }
+            }
+            finished
+        } else {
+            None
+        };
+        if let Some(result) = finished {
+            let state = std::mem::replace(&mut self.state, State::Setup);
+            if let State::Transcribing { dir, seconds, .. } = state {
+                self.state = match result {
+                    Ok(path) => State::Done {
+                        dir,
+                        message: format!("{} de reunión transcritos.", format_duration(seconds)),
+                        transcript: Some(path),
+                    },
+                    Err(err) => State::Done {
+                        dir,
+                        message: format!("Las grabaciones están guardadas, pero la transcripción falló: {err:#}"),
+                        transcript: None,
+                    },
+                };
+            }
         }
     }
 }
@@ -90,9 +145,11 @@ impl eframe::App for MinutaApp {
             ui.separator();
             ui.add_space(8.0);
 
+            self.poll_transcription();
             match &self.state {
                 State::Setup => self.setup_ui(ui),
                 State::Recording { .. } => self.recording_ui(ui, ctx),
+                State::Transcribing { .. } => self.transcribing_ui(ui, ctx),
                 State::Done { .. } => self.done_ui(ui),
             }
 
@@ -169,9 +226,31 @@ impl MinutaApp {
         });
     }
 
+    fn transcribing_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let (status, percent) = match &self.state {
+            State::Transcribing { status, percent, .. } => (status.clone(), *percent),
+            _ => unreachable!(),
+        };
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        ui.label(egui::RichText::new("Transcribiendo").size(18.0));
+        ui.add_space(6.0);
+        ui.label(status);
+        ui.add_space(8.0);
+        match percent {
+            Some(p) => {
+                ui.add(egui::ProgressBar::new(p as f32 / 100.0).show_percentage());
+            }
+            None => {
+                ui.add(egui::ProgressBar::new(0.0).animate(true));
+            }
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Las grabaciones ya están guardadas; puedes cerrar el programa de la reunión.").weak());
+    }
+
     fn done_ui(&mut self, ui: &mut egui::Ui) {
-        let (dir, message) = match &self.state {
-            State::Done { dir, message } => (dir.clone(), message.clone()),
+        let (dir, message, transcript) = match &self.state {
+            State::Done { dir, message, transcript } => (dir.clone(), message.clone(), transcript.clone()),
             _ => unreachable!(),
         };
         ui.label(egui::RichText::new("Reunión terminada").size(18.0));
@@ -180,6 +259,11 @@ impl MinutaApp {
         ui.label(egui::RichText::new(dir.display().to_string()).weak());
         ui.add_space(12.0);
         ui.horizontal(|ui| {
+            if let Some(path) = &transcript {
+                if ui.button("Abrir la transcripción").clicked() {
+                    let _ = std::process::Command::new("cmd").args(["/C", "start", "", &path.display().to_string()]).spawn();
+                }
+            }
             if ui.button("Abrir la carpeta").clicked() {
                 let _ = std::process::Command::new("explorer").arg(&dir).spawn();
             }
@@ -230,7 +314,14 @@ impl MinutaApp {
                 ui.label("Modelo de Whisper");
                 ui.text_edit_singleline(&mut self.settings.model);
                 ui.end_row();
+                ui.label("Palabras habituales");
+                let mut vocab = self.settings.vocabulary.join(", ");
+                if ui.add(egui::TextEdit::singleline(&mut vocab).desired_width(300.0)).changed() {
+                    self.settings.vocabulary = vocab.split(',').map(|w| w.trim().to_string()).filter(|w| !w.is_empty()).collect();
+                }
+                ui.end_row();
             });
+            ui.label(egui::RichText::new("Las palabras habituales (nombres, marcas) ayudan a Whisper a escribirlas bien. Separadas por comas.").weak());
             ui.add_space(8.0);
             if ui.button("Guardar").clicked() {
                 save = true;
