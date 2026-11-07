@@ -64,6 +64,13 @@ En construcción. Nada usable todavía.
   pista: asume que por el micrófono hablas tú y por el altavoz la otra persona.
   Con altavoces en vez de cascos, el micrófono recoge también al otro; usa
   cascos.
+- **Auriculares Bluetooth: solo para escuchar.** Al abrir el micrófono de unos
+  auriculares Bluetooth, Windows los pasa al modo "manos libres" (sonido de
+  teléfono, otro volumen) y, en las pruebas con unos FreeBuds Pro 5, además el
+  micrófono entregaba silencio. La combinación que funciona: micrófono interno
+  del portátil (o uno con cable) para la voz y los auriculares Bluetooth para
+  oír. El micrófono y el altavoz se eligen en Ajustes; por defecto se usan los
+  que Windows tiene para llamadas.
 
 ## Desarrollo
 
