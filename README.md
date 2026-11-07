@@ -96,6 +96,17 @@ El modelo (`ggml-large-v3-turbo`, 1,6 GB) se descarga la primera vez a
 `%LOCALAPPDATA%\minuta\models`. Los ajustes viven en
 `%APPDATA%\minuta\config.toml`.
 
+### Versión para usar
+
+```bash
+cargo build --release
+```
+
+El resultado, `target/release/minuta.exe`, se copia a `dist/minuta/` junto a
+las tres DLL de CUDA (carpeta fuera de git). En este PC hay un acceso directo
+"minuta" en el escritorio que apunta ahí. Tras cada cambio: compilar en
+release y volver a copiar el `.exe`.
+
 Pruebas sin ventana:
 
 ```bash
