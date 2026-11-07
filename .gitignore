@@ -1,0 +1,19 @@
+# Compilación de Rust
+/target/
+
+# Modelos de Whisper: pesan de 500 MB a 1,5 GB; el programa los descarga la primera vez
+/models/
+
+# Grabaciones y transcripciones de prueba
+/grabaciones/
+
+# Editores y SO
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log

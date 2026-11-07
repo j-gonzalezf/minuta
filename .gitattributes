@@ -1,0 +1,9 @@
+# El repositorio guarda siempre LF, y la copia de trabajo también,
+# sea cual sea el sistema.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.wav binary
+*.bin binary
