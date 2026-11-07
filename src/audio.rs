@@ -14,14 +14,60 @@
 
 use anyhow::{Context, Result, anyhow};
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread::{self, JoinHandle};
-use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat, initialize_mta};
+use wasapi::{Device, DeviceEnumerator, Direction, Role, SampleType, StreamMode, WaveFormat, initialize_mta};
 
 pub const SAMPLE_RATE: u32 = 16_000;
 const CHANNELS: u16 = 1;
+
+/// Nombres de los dispositivos disponibles de un tipo (micrófonos o altavoces).
+pub fn list_devices(track: Track) -> Vec<String> {
+    let _ = initialize_mta();
+    let mut names = Vec::new();
+    if let Ok(enumerator) = DeviceEnumerator::new()
+        && let Ok(collection) = enumerator.get_device_collection(device_direction(track))
+    {
+        for i in 0..collection.get_nbr_devices().unwrap_or(0) {
+            if let Ok(device) = collection.get_device_at_index(i)
+                && let Ok(name) = device.get_friendlyname()
+            {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn device_direction(track: Track) -> Direction {
+    match track {
+        Track::Mic => Direction::Capture,
+        // Para el loopback se abre el dispositivo de *reproducción* y se le pide capturar.
+        Track::Speaker => Direction::Render,
+    }
+}
+
+/// El dispositivo pedido por nombre o, si no hay nombre o no se encuentra, el que
+/// Windows usa para llamadas (papel "comunicaciones": el mismo que Discord).
+fn pick_device(enumerator: &DeviceEnumerator, track: Track, wanted: Option<&str>) -> Result<Device> {
+    let direction = device_direction(track);
+    if let Some(wanted) = wanted.filter(|w| !w.trim().is_empty()) {
+        let collection = enumerator.get_device_collection(direction)?;
+        for i in 0..collection.get_nbr_devices()? {
+            let device = collection.get_device_at_index(i)?;
+            if device.get_friendlyname().map(|n| n == wanted).unwrap_or(false) {
+                return Ok(device);
+            }
+        }
+        // Si el dispositivo guardado ya no está (auriculares apagados), se usa el predeterminado.
+    }
+    enumerator
+        .get_default_device_for_role(direction, Role::Communications)
+        .or_else(|_| enumerator.get_default_device(direction))
+        .with_context(|| format!("no hay {} predeterminado", track_label(track)))
+}
 
 /// Qué pista es.
 #[derive(Clone, Copy, Debug)]
@@ -39,17 +85,31 @@ pub struct Recorder {
     frames: Arc<AtomicU64>,
     error: Arc<Mutex<Option<String>>>,
     threads: Vec<JoinHandle<()>>,
-    pub mic_path: PathBuf,
-    pub speaker_path: PathBuf,
+    /// Nombres de los dispositivos que se están grabando (micrófono, altavoz).
+    pub device_names: (String, String),
+}
+
+/// Qué dispositivos usar; `None` es el predeterminado de Windows para llamadas.
+#[derive(Default, Clone)]
+pub struct DeviceChoice {
+    pub mic: Option<String>,
+    pub speaker: Option<String>,
 }
 
 impl Recorder {
     /// Empieza a grabar las dos pistas en los archivos indicados.
-    pub fn start(mic_path: &Path, speaker_path: &Path) -> Result<Self> {
+    pub fn start(mic_path: &Path, speaker_path: &Path, devices: &DeviceChoice) -> Result<Self> {
         let paused = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
         let frames = Arc::new(AtomicU64::new(0));
         let error = Arc::new(Mutex::new(None));
+
+        // Se resuelven aquí los dispositivos para saber sus nombres y fallar pronto.
+        let _ = initialize_mta();
+        let enumerator = DeviceEnumerator::new().context("enumerar dispositivos de audio")?;
+        let mic_name = pick_device(&enumerator, Track::Mic, devices.mic.as_deref())?.get_friendlyname()?;
+        let speaker_name = pick_device(&enumerator, Track::Speaker, devices.speaker.as_deref())?.get_friendlyname()?;
+        let devices = DeviceChoice { mic: Some(mic_name.clone()), speaker: Some(speaker_name.clone()) };
 
         // Los archivos se abren aquí, en el hilo principal, para que un fallo
         // (carpeta inexistente, sin permisos) se vea antes de arrancar nada.
@@ -61,9 +121,9 @@ impl Recorder {
         // mismo instante y queden alineadas.
         let barrier = Arc::new(Barrier::new(3));
         let mut threads = Vec::new();
-        threads.push(spawn_capture(Track::Mic, mic_writer, &paused, &stop, Some(&frames), &error, &barrier));
-        threads.push(spawn_capture(Track::Speaker, speaker_writer, &paused, &stop, None, &error, &barrier));
-        threads.push(spawn_silence(&stop, &error, &barrier));
+        threads.push(spawn_capture(Track::Mic, devices.mic.clone(), mic_writer, &paused, &stop, Some(&frames), &error, &barrier));
+        threads.push(spawn_capture(Track::Speaker, devices.speaker.clone(), speaker_writer, &paused, &stop, None, &error, &barrier));
+        threads.push(spawn_silence(devices.speaker.clone(), &stop, &error, &barrier));
 
         // Si algún hilo falló al arrancar, se nota enseguida.
         thread::sleep(std::time::Duration::from_millis(300));
@@ -81,8 +141,7 @@ impl Recorder {
             frames,
             error,
             threads,
-            mic_path: mic_path.to_path_buf(),
-            speaker_path: speaker_path.to_path_buf(),
+            device_names: (mic_name, speaker_name),
         })
     }
 
@@ -148,8 +207,10 @@ fn record_error(error: &Mutex<Option<String>>, msg: String) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_capture(
     track: Track,
+    device: Option<String>,
     writer: Writer,
     paused: &Arc<AtomicBool>,
     stop: &Arc<AtomicBool>,
@@ -163,7 +224,7 @@ fn spawn_capture(
     let error = Arc::clone(error);
     let barrier = Arc::clone(barrier);
     thread::spawn(move || {
-        if let Err(err) = capture_loop(track, writer, &paused, &stop, frames.as_ref(), &barrier) {
+        if let Err(err) = capture_loop(track, device.as_deref(), writer, &paused, &stop, frames.as_ref(), &barrier) {
             record_error(&error, format!("{}: {err:#}", track_label(track)));
             // Que los demás no se queden esperando en la barrera si este hilo ha fallado antes.
             barrier.wait();
@@ -180,6 +241,7 @@ fn track_label(track: Track) -> &'static str {
 
 fn capture_loop(
     track: Track,
+    device: Option<&str>,
     mut writer: Writer,
     paused: &AtomicBool,
     stop: &AtomicBool,
@@ -189,14 +251,7 @@ fn capture_loop(
     initialize_mta().ok().context("inicializar COM en el hilo de captura")?;
 
     let enumerator = DeviceEnumerator::new().context("enumerar dispositivos de audio")?;
-    // Para el loopback se abre el dispositivo de *reproducción* y se le pide capturar.
-    let device_dir = match track {
-        Track::Mic => Direction::Capture,
-        Track::Speaker => Direction::Render,
-    };
-    let device = enumerator
-        .get_default_device(device_dir)
-        .with_context(|| format!("no hay {} por defecto", track_label(track)))?;
+    let device = pick_device(&enumerator, track, device)?;
     let mut client = device.get_iaudioclient().context("abrir el dispositivo")?;
 
     let format = WaveFormat::new(32, 32, SampleType::Float, SAMPLE_RATE as usize, CHANNELS as usize, None);
@@ -262,22 +317,22 @@ fn capture_loop(
 
 /// Reproduce silencio en el altavoz por defecto mientras dura la grabación, para
 /// que la captura en loopback reciba datos de forma continua (ver módulo).
-fn spawn_silence(stop: &Arc<AtomicBool>, error: &Arc<Mutex<Option<String>>>, barrier: &Arc<Barrier>) -> JoinHandle<()> {
+fn spawn_silence(device: Option<String>, stop: &Arc<AtomicBool>, error: &Arc<Mutex<Option<String>>>, barrier: &Arc<Barrier>) -> JoinHandle<()> {
     let stop = Arc::clone(stop);
     let error = Arc::clone(error);
     let barrier = Arc::clone(barrier);
     thread::spawn(move || {
-        if let Err(err) = silence_loop(&stop, &barrier) {
+        if let Err(err) = silence_loop(device.as_deref(), &stop, &barrier) {
             record_error(&error, format!("silencio en el altavoz: {err:#}"));
             barrier.wait();
         }
     })
 }
 
-fn silence_loop(stop: &AtomicBool, barrier: &Barrier) -> Result<()> {
+fn silence_loop(device: Option<&str>, stop: &AtomicBool, barrier: &Barrier) -> Result<()> {
     initialize_mta().ok().context("inicializar COM en el hilo de silencio")?;
     let enumerator = DeviceEnumerator::new()?;
-    let device = enumerator.get_default_device(Direction::Render).context("no hay altavoz por defecto")?;
+    let device = pick_device(&enumerator, Track::Speaker, device)?;
     let mut client = device.get_iaudioclient()?;
     let format = WaveFormat::new(32, 32, SampleType::Float, SAMPLE_RATE as usize, CHANNELS as usize, None);
     let blockalign = format.get_blockalign() as usize;

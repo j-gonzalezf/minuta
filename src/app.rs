@@ -1,6 +1,6 @@
 //! La ventana: ficha de la reunión, grabar / pausar / detener y el resultado.
 
-use crate::audio::Recorder;
+use crate::audio::{DeviceChoice, Recorder, Track, list_devices};
 use crate::pipeline::{self, Event, Job};
 use crate::settings::Settings;
 use crate::transcribe::Progress;
@@ -56,7 +56,11 @@ impl MinutaApp {
         }
         let mic = dir.join(&self.settings.my_recording_file);
         let speaker = dir.join(&self.settings.other_recording_file);
-        match Recorder::start(&mic, &speaker) {
+        let devices = DeviceChoice {
+            mic: Some(self.settings.mic_device.clone()).filter(|d| !d.is_empty()),
+            speaker: Some(self.settings.speaker_device.clone()).filter(|d| !d.is_empty()),
+        };
+        match Recorder::start(&mic, &speaker, &devices) {
             Ok(recorder) => {
                 self.error = None;
                 self.state = State::Recording { recorder, dir, started_at: Local::now() };
@@ -193,8 +197,10 @@ impl MinutaApp {
     }
 
     fn recording_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let (seconds, paused, thread_error) = match &self.state {
-            State::Recording { recorder, .. } => (recorder.recorded_seconds(), recorder.is_paused(), recorder.error()),
+        let (seconds, paused, thread_error, devices) = match &self.state {
+            State::Recording { recorder, .. } => {
+                (recorder.recorded_seconds(), recorder.is_paused(), recorder.error(), recorder.device_names.clone())
+            }
             _ => unreachable!(),
         };
         if let Some(err) = thread_error {
@@ -224,6 +230,9 @@ impl MinutaApp {
                 self.stop_recording();
             }
         });
+        ui.add_space(12.0);
+        ui.label(egui::RichText::new(format!("Micrófono: {}", devices.0)).weak());
+        ui.label(egui::RichText::new(format!("Altavoz: {}", devices.1)).weak());
     }
 
     fn transcribing_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -293,6 +302,12 @@ impl MinutaApp {
                     }
                 });
                 ui.end_row();
+                ui.label("Micrófono");
+                device_combo(ui, "mic", &mut self.settings.mic_device, Track::Mic);
+                ui.end_row();
+                ui.label("Altavoz");
+                device_combo(ui, "speaker", &mut self.settings.speaker_device, Track::Speaker);
+                ui.end_row();
                 ui.label("Mi nombre");
                 ui.text_edit_singleline(&mut self.settings.my_name);
                 ui.end_row();
@@ -340,6 +355,17 @@ impl MinutaApp {
             self.show_settings = false;
         }
     }
+}
+
+/// Desplegable con los dispositivos de un tipo; la opción vacía es el predeterminado de Windows.
+fn device_combo(ui: &mut egui::Ui, id: &str, selected: &mut String, track: Track) {
+    let label = if selected.is_empty() { "Predeterminado de Windows (llamadas)".to_string() } else { selected.clone() };
+    egui::ComboBox::from_id_salt(id).selected_text(label).width(300.0).show_ui(ui, |ui| {
+        ui.selectable_value(selected, String::new(), "Predeterminado de Windows (llamadas)");
+        for name in list_devices(track) {
+            ui.selectable_value(selected, name.clone(), name);
+        }
+    });
 }
 
 /// `AAMMDD_reunion`, como los archivos de `cliente/reuniones/`.

@@ -1,7 +1,7 @@
-//! Prueba sin ventana: graba 5 segundos las dos pistas en una carpeta temporal
+//! Prueba sin ventana: graba unos segundos las dos pistas en una carpeta temporal
 //! y muestra cuánto dura cada archivo y cuánta señal tiene.
 //!
-//! cargo run --example prueba_grabacion
+//! cargo run --example prueba_grabacion [-- segundos ["nombre del micrófono"]]
 
 #[path = "../src/audio.rs"]
 mod audio;
@@ -9,12 +9,17 @@ mod audio;
 use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let seconds: u64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let devices = audio::DeviceChoice { mic: args.get(1).cloned(), speaker: None };
+
     let dir = std::env::temp_dir().join("minuta-prueba");
     let mic = dir.join("mic.wav");
     let speaker = dir.join("altavoz.wav");
-    println!("Grabando 5 segundos en {}", dir.display());
-    let recorder = audio::Recorder::start(&mic, &speaker)?;
-    for i in 1..=5 {
+    let recorder = audio::Recorder::start(&mic, &speaker, &devices)?;
+    println!("Grabando {seconds} s en {}", dir.display());
+    println!("  micrófono: {}\n  altavoz:   {}", recorder.device_names.0, recorder.device_names.1);
+    for i in 1..=seconds {
         std::thread::sleep(Duration::from_secs(1));
         println!("  {i} s (contador: {:.2} s)", recorder.recorded_seconds());
     }

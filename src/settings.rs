@@ -24,6 +24,9 @@ pub struct Settings {
     pub model: String,
     /// Palabras que salen a menudo y Whisper tiende a escribir mal (nombres, marcas, términos).
     pub vocabulary: Vec<String>,
+    /// Micrófono y altavoz a grabar, por su nombre en Windows. Vacío: el predeterminado para llamadas.
+    pub mic_device: String,
+    pub speaker_device: String,
 }
 
 impl Default for Settings {
@@ -41,6 +44,8 @@ impl Default for Settings {
             vocabulary: ["brìos", "Martín", "newsletter", "Resend", "Search Console", "Vercel", "GitHub", "Discord"]
                 .map(String::from)
                 .to_vec(),
+            mic_device: String::new(),
+            speaker_device: String::new(),
         }
     }
 }
